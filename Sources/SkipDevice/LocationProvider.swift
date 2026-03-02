@@ -169,7 +169,7 @@ public class LocationProvider: NSObject {
 
         #if SKIP
         listener = LocListener(callback: { location in
-            logger.info("location update: \(location.latitude) \(location.longitude)")
+            // logger.info("location update: \(location.latitude) \(location.longitude)")
             self.lastLatitude = location.latitude
             self.lastLongitude = location.longitude
             self.lastAltitude = location.altitude
@@ -198,7 +198,7 @@ public class LocationProvider: NSObject {
         self.callback = { result in
             switch result {
             case .success(let location):
-                logger.info("location update: \(location.latitude) \(location.longitude)")
+                // logger.info("location update: \(location.latitude) \(location.longitude)")
                 continuation.yield(with: .success(location))
             case .failure(let error):
                 continuation.yield(with: .failure(error))
