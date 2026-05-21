@@ -261,22 +261,51 @@ public class LocationProvider: NSObject {
     // MARK: - Heading Monitoring
 
     /// Starts continuous heading monitoring. Returns an AsyncThrowingStream of HeadingEvent.
-    /// iOS: uses CLLocationManager heading. Android: uses rotation vector sensor + GeomagneticField.
+    /// iOS: uses CLLocationManager heading (magnetometer + accelerometer, no gyroscope).
+    /// Android: uses TYPE_GEOMAGNETIC_ROTATION_VECTOR (magnetometer + accelerometer, no gyroscope)
+    ///          to match iOS behavior — no gyroscope drift. Low-pass filtered for stability.
     /// macOS: heading not available, stream finishes immediately.
     public func monitorHeading() -> AsyncThrowingStream<HeadingEvent, Error> {
         logger.debug("starting heading monitor")
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: HeadingEvent.self)
 
         #if SKIP
-        headingListener = sensorManager.startSensorUpdates(type: Sensor.TYPE_ROTATION_VECTOR, interval: nil) { event in
+        // Use TYPE_GEOMAGNETIC_ROTATION_VECTOR: accelerometer + magnetometer only (no gyroscope).
+        // Matches iOS CLLocationManager.heading — magnetometer-based, no gyro drift.
+        // Falls back to TYPE_ROTATION_VECTOR on rare devices without the geomagnetic sensor.
+        let hasGeomagSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR) != nil
+        let sensorType = hasGeomagSensor
+            ? Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR
+            : Sensor.TYPE_ROTATION_VECTOR
+        logger.info("🧭 COMPASS: using \(hasGeomagSensor ? "TYPE_GEOMAGNETIC_ROTATION_VECTOR" : "TYPE_ROTATION_VECTOR (fallback)")")
+
+        // Low-pass filter state for heading smoothing (magnetometer-only is noisier than gyro-fused)
+        var filteredHeading: Double = -1.0
+        let alpha: Double = 0.4  // 0.4 = responsive yet smooth; lower = smoother but laggier
+        var headingSampleCount: Int = 0
+
+        // Request ~16Hz updates (SENSOR_DELAY_UI = 60ms) instead of default SENSOR_DELAY_NORMAL (~5Hz)
+        headingListener = sensorManager.startSensorUpdates(type: sensorType, interval: 0.06) { event in
             let rotationMatrix = FloatArray(9)
             SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
             let orientation = FloatArray(3)
             SensorManager.getOrientation(rotationMatrix, orientation)
 
             // orientation[0] is azimuth in radians (-π to π)
-            var magneticHeading = Double(orientation[0]) * 180.0 / Double.pi
-            if magneticHeading < 0 { magneticHeading += 360.0 }
+            var rawHeading = Double(orientation[0]) * 180.0 / Double.pi
+            if rawHeading < 0 { rawHeading += 360.0 }
+
+            // Low-pass filter with circular wraparound handling
+            if filteredHeading < 0 {
+                filteredHeading = rawHeading
+            } else {
+                var delta = rawHeading - filteredHeading
+                if delta > 180.0 { delta -= 360.0 }
+                if delta < -180.0 { delta += 360.0 }
+                filteredHeading += alpha * delta
+                if filteredHeading < 0 { filteredHeading += 360.0 }
+                if filteredHeading >= 360.0 { filteredHeading -= 360.0 }
+            }
 
             // Calculate true heading using GeomagneticField declination
             var trueHeading = -1.0
@@ -287,14 +316,22 @@ public class LocationProvider: NSObject {
                     Float(self.lastAltitude),
                     System.currentTimeMillis()
                 )
-                trueHeading = magneticHeading + Double(geoField.getDeclination())
+                trueHeading = filteredHeading + Double(geoField.getDeclination())
                 if trueHeading < 0 { trueHeading += 360.0 }
                 if trueHeading >= 360.0 { trueHeading -= 360.0 }
             }
 
+            headingSampleCount += 1
+            if headingSampleCount <= 5 || headingSampleCount % 500 == 0 {
+                let decl = self.lastLatitude != 0.0 || self.lastLongitude != 0.0
+                    ? "\(GeomagneticField(Float(self.lastLatitude), Float(self.lastLongitude), Float(self.lastAltitude), System.currentTimeMillis()).getDeclination())°"
+                    : "N/A (no GPS)"
+                logger.info("🧭 COMPASS [\(headingSampleCount)]: raw=\(String(format: "%.1f", rawHeading))° filtered=\(String(format: "%.1f", filteredHeading))° true=\(String(format: "%.1f", trueHeading))° decl=\(decl) accuracy=\(event.accuracy) lat=\(self.lastLatitude)")
+            }
+
             let headingEvent = HeadingEvent(
                 trueHeading: trueHeading,
-                magneticHeading: magneticHeading,
+                magneticHeading: filteredHeading,
                 headingAccuracy: Double(event.accuracy),
                 timestamp: Double(event.timestamp) / 1_000_000_000.0
             )
@@ -409,7 +446,7 @@ public struct LocationEvent {
         self.longitude = location.getLongitude()
         // some accessors may fail with precondition exceptions like `java.lang.IllegalStateException: The Mean Sea Level altitude of this location is not set.`, so we defensively check whether the property is set and fallback to empty values
         self.horizontalAccuracy = location.hasAccuracy() ? location.getAccuracy().toDouble() : 0.0
-        self.altitude = location.hasMslAltitude() ? location.getMslAltitudeMeters() : 0.0
+        self.altitude = if android.os.Build.VERSION.SDK_INT >= 34 { location.hasMslAltitude() ? location.getMslAltitudeMeters() : (location.hasAltitude() ? location.getAltitude() : 0.0) } else { location.hasAltitude() ? location.getAltitude() : 0.0 }
         self.ellipsoidalAltitude = location.hasAltitude() ? location.getAltitude() : 0.0
         self.verticalAccuracy = location.hasVerticalAccuracy() ? location.getVerticalAccuracyMeters().toDouble() : 0.0
         self.speed = location.hasSpeed() ? location.getSpeed().toDouble() : 0.0
