@@ -23,7 +23,7 @@ private let logger: Logger = Logger(subsystem: "skip.device", category: "DeviceM
 ///
 /// - iOS: Uses `CMDeviceMotion` (hardware sensor fusion via CoreMotion).
 /// - Android: Combines `TYPE_LINEAR_ACCELERATION` + `TYPE_GRAVITY` + `TYPE_GYROSCOPE`.
-public class DeviceMotionProvider {
+public final class DeviceMotionProvider: @unchecked Sendable {
     #if SKIP
     private let sensorManager = ProcessInfo.processInfo.androidContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private var linearAccelListener: SensorEventHandler? = nil

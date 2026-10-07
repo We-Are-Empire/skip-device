@@ -563,13 +563,13 @@ extension LocationProvider: CLLocationManagerDelegate {
 
     #if os(iOS)
     public func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        let event = HeadingEvent(
+            trueHeading: newHeading.trueHeading,
+            magneticHeading: newHeading.magneticHeading,
+            headingAccuracy: newHeading.headingAccuracy,
+            timestamp: newHeading.timestamp.timeIntervalSince1970
+        )
         MainActor.assumeIsolated {
-            let event = HeadingEvent(
-                trueHeading: newHeading.trueHeading,
-                magneticHeading: newHeading.magneticHeading,
-                headingAccuracy: newHeading.headingAccuracy,
-                timestamp: newHeading.timestamp.timeIntervalSince1970
-            )
             headingContinuation?.yield(event)
         }
     }
