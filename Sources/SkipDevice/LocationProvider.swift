@@ -599,6 +599,23 @@ public struct LocationEvent: Hashable, Sendable {
 
     public var timestamp: TimeInterval
 
+    // MARK: - Presence flags
+    //
+    // The two platforms signal "this fix does not carry the value" differently — Android
+    // via `Location.has*()` (the getter then returns 0.0), CoreLocation via a negative
+    // sentinel in the value or its accuracy. Both collapse to an in-range number, so a
+    // consumer reading the value alone cannot tell "not reported" from a real zero: an
+    // absent speed reads as "stopped" and an absent course as "due north". These flags
+    // carry that distinction across, so callers can map absence to nil instead of guessing.
+
+    /// Whether this fix actually carries a speed. When false, `speed` is meaningless.
+    public var hasSpeed: Bool
+    /// Whether this fix actually carries a course/bearing. When false, `course` is meaningless.
+    public var hasCourse: Bool
+    /// Whether this fix actually carries an altitude. When false, `altitude` /
+    /// `ellipsoidalAltitude` are meaningless.
+    public var hasAltitude: Bool
+
     #if SKIP
     /// https://developer.android.com/reference/android/location/Location
     init(location: android.location.Location) {
@@ -608,10 +625,12 @@ public struct LocationEvent: Hashable, Sendable {
         self.horizontalAccuracy = location.hasAccuracy() ? location.getAccuracy().toDouble() : 0.0
         // https://developer.android.com/reference/android/location/Location#getMslAltitudeMeters()
         // `hasMslAltitude()`/`getMslAltitudeMeters()` were added in API 34 (Android 14); calling them on older devices throws NoSuchMethodError
+        // Without an MSL altitude (before API 34, or a fix that lacks one), fall back to the
+        // WGS84 altitude rather than 0.0, which would read as sea level.
         if android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE, location.hasMslAltitude() {
             self.altitude = location.getMslAltitudeMeters()
         } else {
-            self.altitude = 0.0
+            self.altitude = location.hasAltitude() ? location.getAltitude() : 0.0
         }
         self.ellipsoidalAltitude = location.hasAltitude() ? location.getAltitude() : 0.0
         self.verticalAccuracy = location.hasVerticalAccuracy() ? location.getVerticalAccuracyMeters().toDouble() : 0.0
@@ -620,6 +639,9 @@ public struct LocationEvent: Hashable, Sendable {
         self.course = location.hasBearing() ? location.getBearing().toDouble() : 0.0
         self.courseAccuracy = location.hasBearingAccuracy() ? location.getBearingAccuracyDegrees().toDouble() : 0.0
         self.timestamp = location.getTime().toDouble() / 1_000.0
+        self.hasSpeed = location.hasSpeed()
+        self.hasCourse = location.hasBearing()
+        self.hasAltitude = location.hasAltitude()
     }
     #else
     /// https://developer.apple.com/documentation/corelocation/cllocation
@@ -635,6 +657,11 @@ public struct LocationEvent: Hashable, Sendable {
         self.course = location.course
         self.courseAccuracy = location.courseAccuracy
         self.timestamp = location.timestamp.timeIntervalSince1970
+        // CoreLocation's sentinels: an unavailable speed/course is negative, and an
+        // unavailable altitude is signalled by a negative verticalAccuracy.
+        self.hasSpeed = location.speed >= 0
+        self.hasCourse = location.course >= 0
+        self.hasAltitude = location.verticalAccuracy >= 0
     }
     #endif
 }
